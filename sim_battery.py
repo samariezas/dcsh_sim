@@ -7,7 +7,7 @@ from matplotlib.lines import Line2D
 
 # ---------- inputs ----------
 HERE = Path(__file__).parent
-OUT = HERE / "results"
+OUT = HERE / "report" / "simulations" / "component"
 PANEL_AREA = 50.0   # m2
 PANEL_EFFICIENCY = 0.20 #idfk
 DAILY_LOAD = 10.0   # kWh per day, yearly average
@@ -20,6 +20,7 @@ WEATHER = ["bad", "average", "good"]
 SCENARIOS = [(s, w, d) for s in ["winter", "summer"] for w in WEATHER for d in ["weekday", "weekend"]]
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]
 INK, MUTED = "#0b0b0b", "#52514e"
+WIDTH = 5.94        # inch, \textwidth of the report
 
 
 def labels(dates):
@@ -77,10 +78,6 @@ def price_driven(day, rank_count):          # M3: n cheapest and n most expensiv
     return np.select([rank <= rank_count, rank > len(day) - rank_count], [-POWER, POWER], 0.0)
 
 
-def price3(day):
-    return price_driven(day, 3)
-
-
 def price4(day):
     return price_driven(day, 4)
 
@@ -89,9 +86,13 @@ def price5(day):
     return price_driven(day, 5)
 
 
-RULES = [no_battery, fixed_schedule, load_following, price3, price4, price5]
+def price6(day):
+    return price_driven(day, 6)
+
+
+RULES = [no_battery, fixed_schedule, load_following, price4, price5, price6]
 NAMES = {"no_battery": "no battery", "fixed_schedule": "fixed schedule", "load_following": "load following",
-         "price3": "price-driven, 3 h", "price4": "price-driven, 4 h", "price5": "price-driven, 5 h"}
+         "price4": "price-driven, 4 h", "price5": "price-driven, 5 h", "price6": "price-driven, 6 h"}
 
 
 # ---------- model ----------
@@ -127,7 +128,7 @@ def hours(a):
 
 
 def plot_inputs(prof):
-    fig, ax = plt.subplots(3, 2, figsize=(6.3, 6), sharex=True, sharey="row")
+    fig, ax = plt.subplots(3, 2, figsize=(WIDTH, 6), sharex=True, sharey="row")
     for (s, w, d), day in prof.items():
         a, ls, x = ax[:, ["winter", "summer"].index(s)], "-" if d == "weekday" else "--", day.uur + 0.5
         a[0].plot(x, day.price, color=COLORS[WEATHER.index(w)], ls=ls)
@@ -146,7 +147,7 @@ def plot_inputs(prof):
 
 
 def plot_weather(day):
-    fig, ax = plt.subplots(1, 2, figsize=(6.3, 2.4), sharey=True)
+    fig, ax = plt.subplots(1, 2, figsize=(WIDTH, 2.4), sharey=True)
     for a, s in zip(ax, ["winter", "summer"]):
         pv = day[day.season == s].pv
         a.hist(pv, bins=30, color=COLORS[0], edgecolor="white", linewidth=0.5)
@@ -162,15 +163,16 @@ def plot_weather(day):
 
 
 def plot_soc(prof, sell):
-    fig, ax = plt.subplots(4, 3, figsize=(6.3, 7), sharex=True, sharey=True)
+    fig, ax = plt.subplots(4, 3, figsize=(WIDTH, 7), sharex=True, sharey=True)
     for (s, w, d), day in prof.items():
         a = ax[2 * ["winter", "summer"].index(s) + ["weekday", "weekend"].index(d), WEATHER.index(w)]
-        for r, c in zip(RULES[1:], COLORS):
+        for r in [load_following, price5]:
             soc = simulate(r, day, sell)[1]
-            a.plot(np.r_[0, day.uur + 1], np.r_[soc[-1], soc], color=c, label=NAMES[r.__name__])
-        a.set_title(f"{s}, {w} weather, {d}", fontsize=8)
-    for a in ax[:, 0]:
-        a.set_ylabel("SoC (kWh)")
+            a.plot(np.r_[0, day.uur + 1], np.r_[soc[-1], soc], color=COLORS[RULES.index(r) - 1], label=NAMES[r.__name__])
+        if s == "winter" and d == "weekday":
+            a.set_title(f"{w} weather")
+        if w == "bad":
+            a.set_ylabel(f"{s}, {d}\nSoC (kWh)")
     for a in ax[-1]:
         a.set_xlabel("hour of day")
         hours(a)
@@ -179,9 +181,8 @@ def plot_soc(prof, sell):
     fig.savefig(OUT / f"soc_{'sell' if sell else 'nosell'}.png")
 
 
-def plot_savings(cost, sell):
-    saving = cost.drop(columns="no_battery").rsub(cost.no_battery, axis=0)
-    fig, ax = plt.subplots(2, 1, figsize=(6.3, 4.8), sharey=True)
+def plot_savings(saving, sell):
+    fig, ax = plt.subplots(2, 1, figsize=(WIDTH, 4.8), sharey=True)
     for a, s in zip(ax, ["winter", "summer"]):
         g = saving.loc[s]
         x = np.arange(len(g))
@@ -202,12 +203,16 @@ if __name__ == "__main__":
     plot_inputs(prof)
     plot_weather(day)
     days = day.groupby(["season", "weather", "daytype"], observed=True).size()
+    counts = days.unstack().reindex(["winter", "summer"], level=0).assign(total=lambda t: t.sum(axis=1))
+    counts.rename_axis(columns=None).to_latex(OUT / "scenario_days.tex", index_names=False)
+    print(f"days per scenario\n{counts}")
     for sell in [True, False]:
         cost = pd.DataFrame({r.__name__: [simulate(r, prof[sc], sell)[0].sum() for sc in SCENARIOS] for r in RULES},
                             index=pd.MultiIndex.from_tuples(SCENARIOS))
-        plot_savings(cost, sell)
+        saving = cost.drop(columns="no_battery").rsub(cost.no_battery, axis=0)
+        plot_savings(saving, sell)
         plot_soc(prof, sell)
-        table = cost.rename(columns=NAMES).assign(days=days)
-        table.index = [" ".join(sc) for sc in table.index]
-        table.to_latex(OUT / f"costs_{'sell' if sell else 'nosell'}.tex", float_format="%.2f")
-        print(f"\ncost per day (EUR), {'with' if sell else 'without'} selling from battery\n{table.round(2)}")
+        table = saving.rename(columns=NAMES).round(2) + 0.0
+        table.style.format("{:.2f}").highlight_max(axis=1, props="textbf:--rwrap;").to_latex(
+            OUT / f"savings_{'sell' if sell else 'nosell'}.tex", hrules=True, clines="skip-last;data")
+        print(f"\nsaving per day (EUR), {'with' if sell else 'without'} selling from battery\n{table.round(2)}")
